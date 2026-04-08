@@ -71,6 +71,52 @@ def get_current_user():
     except:
         return None
     
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # USERS TABLE
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        email TEXT UNIQUE,
+        phone TEXT,
+        password TEXT,
+        income REAL,
+        tier TEXT,
+        role TEXT,
+        status TEXT,
+        reset_otp TEXT,
+        otp_expiry TEXT
+    )
+    """)
+
+    # ACCOUNTS TABLE
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        account_number TEXT,
+        account_type TEXT,
+        account_tier TEXT,
+        balance REAL,
+        status TEXT
+    )
+    """)
+
+    # TOKEN BLACKLIST
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS token_blacklist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token TEXT,
+        created_at TEXT
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+    
 def create_admin_if_not_exists():
     conn = get_db()
     cursor = conn.cursor()
@@ -115,7 +161,7 @@ def create_admin_if_not_exists():
         conn.commit()
 
     conn.close()
-
+init_db()
 create_admin_if_not_exists()  # 🔥 CALL THIS
 
 # ================= TIER =================
