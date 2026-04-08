@@ -1,0 +1,337 @@
+from flask import Flask, request, jsonify
+import sqlite3
+
+app = Flask(__name__)
+DB = "banking.db"
+
+
+def get_db():
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# ---------------- ADD BENEFICIARY ----------------
+@app.route("/add-beneficiary", methods=["POST"])
+def add_beneficiary():
+    data = request.get_json()
+
+    acc_no = data["account_number"]
+    name = data["account_holder_name"]
+    ifsc = data["ifsc_code"]
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # 🔍 CHECK IF ACCOUNT EXISTS IN BANK ACCOUNTS TABLE
+    cursor.execute("""
+        SELECT * FROM accounts
+        WHERE account_number=? AND account_holder_name=? AND ifsc_code=?
+    """, (acc_no, name, ifsc))
+
+    match = cursor.fetchone()
+
+    if not match:
+        return jsonify({
+            "error": "Invalid account details. Beneficiary not added."
+        }), 400
+
+    # 🔍 CHECK IF ALREADY EXISTS (avoid duplicates)
+    cursor.execute("""
+        SELECT * FROM beneficiaries
+        WHERE account_number=?
+    """, (acc_no,))
+
+    exists = cursor.fetchone()
+
+    if exists:
+        return jsonify({
+            "message": "Beneficiary already exists"
+        })
+
+    # ➕ INSERT BENEFICIARY
+    cursor.execute("""
+        INSERT INTO beneficiaries
+        (account_number, account_holder_name, ifsc_code)
+        VALUES (?, ?, ?)
+    """, (acc_no, name, ifsc))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "message": "Beneficiary added successfully"
+    })
+
+
+# ---------------- GET BENEFICIARIES ----------------
+@app.route("/beneficiaries", methods=["GET"])
+def get_beneficiaries():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT * FROM beneficiaries
+    """)
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
+        result.append({
+            "id": r["id"],
+            "account_number": r["account_number"],
+            "account_holder_name": r["account_holder_name"],
+            "ifsc_code": r["ifsc_code"],
+            "created_at": r["created_at"]
+        })
+
+    return jsonify(result)
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
+
+from flask import Flask, request, jsonify
+import sqlite3
+import time
+
+app = Flask(__name__)
+DB = "banking.db"
+
+
+def get_db():
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# ---------------- TRANSFER API ----------------
+@app.route("/transfer", methods=["POST"])
+def transfer_money():
+    data = request.get_json()
+
+    from_acc = data["from_account"]
+    to_acc = data["to_account"]
+    amount = float(data["amount"])
+    mode = data["mode"]   # IMPS / NEFT / RTGS
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # ---------------- CHECK SENDER ----------------
+    cursor.execute("SELECT * FROM accounts WHERE account_number=?", (from_acc,))
+    sender = cursor.fetchone()
+
+    if not sender:
+        return jsonify({"error": "Sender account not found"}), 404
+
+    # ---------------- CHECK BENEFICIARY ----------------
+    cursor.execute("""
+        SELECT * FROM beneficiaries
+        WHERE account_number=?
+    """, (to_acc,))
+
+    ben = cursor.fetchone()
+
+    if not ben:
+        return jsonify({"error": "Beneficiary not registered"}), 403
+
+    # ---------------- BALANCE CHECK ----------------
+    if sender["balance"] < amount:
+        return jsonify({"error": "Insufficient balance"}), 400
+
+    # ---------------- MODE RULES ----------------
+    charge = 0
+    delay = 0
+
+    if mode == "IMPS":
+        charge = 10
+        delay = 0
+
+    elif mode == "NEFT":
+        charge = 0
+        delay = 10
+
+    elif mode == "RTGS":
+        if amount <= 200000:
+            return jsonify({"error": "RTGS allowed only above 2 lakh"}), 400
+        charge = 0
+        delay = 20
+
+    else:
+        return jsonify({"error": "Invalid transfer mode"}), 400
+
+    total_deduction = amount + charge
+
+    if sender["balance"] < total_deduction:
+        return jsonify({"error": "Insufficient balance including charges"}), 400
+
+    # ---------------- APPLY DELAY ----------------
+    if delay > 0:
+        time.sleep(delay)
+
+    # ---------------- UPDATE BALANCE ----------------
+    cursor.execute("""
+        UPDATE accounts
+        SET balance = balance - ?
+        WHERE account_number=?
+    """, (total_deduction, from_acc))
+
+    cursor.execute("""
+        UPDATE accounts
+        SET balance = balance + ?
+        WHERE account_number=?
+    """, (amount, to_acc))
+
+    # ---------------- INSERT TRANSACTION ----------------
+    cursor.execute("""
+        INSERT INTO transactions
+        (from_account, to_account, amount, mode, charge, status)
+        VALUES (?, ?, ?, ?, ?, 'SUCCESS')
+    """, (from_acc, to_acc, amount, mode, charge))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "message": "Transfer successful",
+        "mode": mode,
+        "amount": amount,
+        "charge": charge
+    })
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
+
+from flask import Flask, request, jsonify
+import sqlite3
+import time
+
+app = Flask(__name__)
+DB = "banking.db"
+
+
+def get_db():
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# ---------------- EMPLOYEE CASH DEPOSIT ----------------
+@app.route("/employee/deposit", methods=["POST"])
+def employee_deposit():
+    data = request.get_json()
+
+    account_no = data["account_number"]
+    amount = float(data["amount"])
+    employee_id = data.get("employee_id", "EMP001")  # optional tracking
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # 🔍 CHECK ACCOUNT
+    cursor.execute("""
+        SELECT * FROM accounts
+        WHERE account_number=?
+    """, (account_no,))
+
+    acc = cursor.fetchone()
+
+    if not acc:
+        return jsonify({"error": "Account not found"}), 404
+
+    # ⚡ REAL-TIME SIMULATION (instant banking credit)
+    time.sleep(1)
+
+    # 💰 CREDIT MONEY
+    cursor.execute("""
+        UPDATE accounts
+        SET balance = balance + ?
+        WHERE account_number=?
+    """, (amount, account_no))
+
+    # 📜 INSERT TRANSACTION
+    cursor.execute("""
+        INSERT INTO transactions
+        (from_account, to_account, amount, mode, charge, status)
+        VALUES (?, ?, ?, 'CASH_DEPOSIT', 0, 'SUCCESS')
+    """, ("CASH", account_no, amount))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "message": "Deposit successful",
+        "account_number": account_no,
+        "amount_added": amount,
+        "credited_by": employee_id
+    })
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
+
+from flask import Flask, request, jsonify
+import sqlite3
+
+app = Flask(__name__)
+DB = "banking.db"
+
+
+def get_db():
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# ---------------- MINI STATEMENT ----------------
+@app.route("/mini-statement/<account_number>", methods=["GET"])
+def mini_statement(account_number):
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT from_account, to_account, amount, mode, charge, status, created_at
+        FROM transactions
+        WHERE from_account = ? OR to_account = ?
+        ORDER BY created_at DESC
+        LIMIT 10
+    """, (account_number, account_number))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    statement = []
+
+    for r in rows:
+        # determine debit or credit
+        if r["from_account"] == account_number:
+            txn_type = "DEBIT"
+        else:
+            txn_type = "CREDIT"
+
+        statement.append({
+            "type": txn_type,
+            "from": r["from_account"],
+            "to": r["to_account"],
+            "amount": r["amount"],
+            "mode": r["mode"],
+            "charge": r["charge"],
+            "status": r["status"],
+            "date": r["created_at"]
+        })
+
+    return jsonify({
+        "account_number": account_number,
+        "mini_statement": statement
+    })
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
