@@ -70,6 +70,53 @@ def get_current_user():
 
     except:
         return None
+    
+def create_admin_if_not_exists():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM users WHERE email='admin@gmail.com'")
+    if not cursor.fetchone():
+        cursor.execute("""
+        INSERT INTO users(name,email,phone,password,income,tier,role,status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "Admin",
+            "admin@gmail.com",
+            "9999999999",
+            "admin123",
+            1000000,
+            "GOLD",
+            "EMPLOYEE",
+            "ACTIVE"
+        ))
+        conn.commit()
+
+    conn.close()
+def create_admin_if_not_exists():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM users WHERE email='admin@gmail.com'")
+    if not cursor.fetchone():
+        cursor.execute("""
+        INSERT INTO users(name,email,phone,password,income,tier,role,status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "Admin",
+            "admin@gmail.com",
+            "9999999999",
+            "admin123",
+            1000000,
+            "GOLD",
+            "EMPLOYEE",
+            "ACTIVE"
+        ))
+        conn.commit()
+
+    conn.close()
+
+create_admin_if_not_exists()  # 🔥 CALL THIS
 
 # ================= TIER =================
 def get_tier(income):
