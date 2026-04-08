@@ -6,10 +6,10 @@ import random
 import time
 from datetime import timedelta
 from flask_mail import Mail, Message
-
-
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app, origins="*")
 
 DB = "banking.db"
 SECRET_KEY = "mysecretkey123"
@@ -91,31 +91,68 @@ def init_db():
         otp_expiry TEXT
     )
     """)
+    cursor.execute("""
+CREATE TABLE IF NOT EXISTS beneficiaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    beneficiary_name TEXT,
+    account_number TEXT,
+    ifsc_code TEXT
+)
+""")
+
+    cursor.execute("""
+CREATE TABLE IF NOT EXISTS transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_account TEXT,
+    to_account TEXT,
+    amount REAL,
+    mode TEXT,
+    charge REAL,
+    status TEXT,
+    created_at TEXT
+)
+""")
+
+    cursor.execute("""
+CREATE TABLE IF NOT EXISTS loans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_number TEXT,
+    loan_amount REAL,
+    interest_rate REAL,
+    tenure_months INTEGER,
+    emi REAL,
+    status TEXT,
+    remaining_amount REAL,
+    paid_amount REAL
+)
+""")
 
     # ACCOUNTS TABLE
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS accounts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        account_number TEXT,
-        account_type TEXT,
-        account_tier TEXT,
-        balance REAL,
-        status TEXT
-    )
-    """)
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    account_number TEXT,
+    account_type TEXT,
+    account_tier TEXT,
+    balance REAL,
+    status TEXT
+)
+""")
 
     # TOKEN BLACKLIST
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS token_blacklist (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        token TEXT,
-        created_at TEXT
-    )
-    """)
+CREATE TABLE IF NOT EXISTS token_blacklist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token TEXT,
+    created_at TEXT
+)
+""")
 
     conn.commit()
     conn.close()
+
     
 def create_admin_if_not_exists():
     conn = get_db()
@@ -726,5 +763,6 @@ def reset_password():
 # =========================================================
 # RUN
 # =========================================================
+
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=10000)
