@@ -1,0 +1,5 @@
+Flask
+Flask-Mail
+PyJWT
+gunicorn
+flask-cors
