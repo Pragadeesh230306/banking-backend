@@ -6,7 +6,7 @@ import random
 import time
 from datetime import timedelta
 from flask_mail import Mail, Message
-from app import app
+
 
 
 app = Flask(__name__)
