@@ -5,11 +5,11 @@ import random
 import time
 from datetime import timedelta
 from flask_mail import Mail, Message
-from flask_cors import CORS
+
 import threading
 
 app = Flask(__name__)
-CORS(app, origins="*")
+
 
 # ================= CONFIG =================
 DB = "banking.db"
