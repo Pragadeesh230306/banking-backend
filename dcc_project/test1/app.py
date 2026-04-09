@@ -1,23 +1,24 @@
 from flask import Flask, request, jsonify
 import sqlite3
-import jwt
 import datetime
 import random
 import time
 from datetime import timedelta
 from flask_mail import Mail, Message
 from flask_cors import CORS
+import threading
 
 app = Flask(__name__)
 CORS(app, origins="*")
 
+# ================= CONFIG =================
 DB = "banking.db"
 SECRET_KEY = "mysecretkey123"
 
-# ================= EMAIL CONFIG =================
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USE_SSL'] = False
 app.config['MAIL_USERNAME'] = 'pragdeezzh230306@gmail.com'
 app.config['MAIL_PASSWORD'] = 'nzuu zcih rcsi omqh'
 
@@ -25,7 +26,7 @@ mail = Mail(app)
 
 # ================= DB =================
 def get_db():
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -35,47 +36,11 @@ pending_users = {}
 transfer_otp_store = {}
 pending_transfer = {}
 
-# ================= JWT =================
-def generate_token(user_id, email):
-    payload = {
-        "user_id": user_id,
-        "email": email,
-        "exp": datetime.datetime.utcnow() + timedelta(hours=2)
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-
-def verify_token(token):
-    try:
-        return jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-    except:
-        return None
-
-def get_current_user():
-    auth = request.headers.get("Authorization")
-    if not auth:
-        return None
-
-    try:
-        token = auth.split(" ")[1]
-
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM token_blacklist WHERE token=?", (token,))
-        if cursor.fetchone():
-            conn.close()
-            return None
-        conn.close()
-
-        return verify_token(token)
-
-    except:
-        return None
-    
+# ================= DB INIT =================
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
-    # USERS TABLE
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,120 +53,64 @@ def init_db():
         role TEXT,
         status TEXT,
         reset_otp TEXT,
-        otp_expiry TEXT
+        otp_expiry TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
     """)
-    cursor.execute("""
-CREATE TABLE IF NOT EXISTS beneficiaries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    beneficiary_name TEXT,
-    account_number TEXT,
-    ifsc_code TEXT
-)
-""")
 
     cursor.execute("""
-CREATE TABLE IF NOT EXISTS transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_account TEXT,
-    to_account TEXT,
-    amount REAL,
-    mode TEXT,
-    charge REAL,
-    status TEXT,
-    created_at TEXT
-)
-""")
+    CREATE TABLE IF NOT EXISTS accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        account_number TEXT,
+        account_type TEXT,
+        account_tier TEXT,
+        balance REAL,
+        status TEXT
+    )
+    """)
 
     cursor.execute("""
-CREATE TABLE IF NOT EXISTS loans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_number TEXT,
-    loan_amount REAL,
-    interest_rate REAL,
-    tenure_months INTEGER,
-    emi REAL,
-    status TEXT,
-    remaining_amount REAL,
-    paid_amount REAL
-)
-""")
+    CREATE TABLE IF NOT EXISTS transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_account TEXT,
+        to_account TEXT,
+        amount REAL,
+        mode TEXT,
+        charge REAL,
+        status TEXT,
+        created_at TEXT
+    )
+    """)
 
-    # ACCOUNTS TABLE
     cursor.execute("""
-CREATE TABLE IF NOT EXISTS accounts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    account_number TEXT,
-    account_type TEXT,
-    account_tier TEXT,
-    balance REAL,
-    status TEXT
-)
-""")
+    CREATE TABLE IF NOT EXISTS loans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_number TEXT,
+        loan_amount REAL,
+        interest_rate REAL,
+        tenure_months INTEGER,
+        emi REAL,
+        status TEXT,
+        remaining_amount REAL,
+        paid_amount REAL
+    )
+    """)
 
-    # TOKEN BLACKLIST
     cursor.execute("""
-CREATE TABLE IF NOT EXISTS token_blacklist (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    token TEXT,
-    created_at TEXT
-)
-""")
+    CREATE TABLE IF NOT EXISTS token_blacklist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token TEXT,
+        created_at TEXT
+    )
+    """)
 
     conn.commit()
     conn.close()
 
-    
-def create_admin_if_not_exists():
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM users WHERE email='admin@gmail.com'")
-    if not cursor.fetchone():
-        cursor.execute("""
-        INSERT INTO users(name,email,phone,password,income,tier,role,status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            "Admin",
-            "admin@gmail.com",
-            "9999999999",
-            "admin123",
-            1000000,
-            "GOLD",
-            "EMPLOYEE",
-            "ACTIVE"
-        ))
-        conn.commit()
-
-    conn.close()
-def create_admin_if_not_exists():
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM users WHERE email='admin@gmail.com'")
-    if not cursor.fetchone():
-        cursor.execute("""
-        INSERT INTO users(name,email,phone,password,income,tier,role,status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            "Admin",
-            "admin@gmail.com",
-            "9999999999",
-            "admin123",
-            1000000,
-            "GOLD",
-            "EMPLOYEE",
-            "ACTIVE"
-        ))
-        conn.commit()
-
-    conn.close()
 init_db()
-create_admin_if_not_exists()  # 🔥 CALL THIS
 
-# ================= TIER =================
+# ================= HELPERS =================
 def get_tier(income):
     if income < 300000:
         return "SILVER"
@@ -209,17 +118,14 @@ def get_tier(income):
         return "GOLD"
     elif income < 1500000:
         return "PLATINUM"
-    else:
-        return "DIAMOND"
+    return "DIAMOND"
 
-# =========================================================
-# REGISTER + OTP
-# =========================================================
+# ================= REGISTER =================
 @app.route("/register", methods=["POST"])
 def register():
     data = request.json
-    email = data["email"]
 
+    email = data["email"]
     otp = str(random.randint(100000, 999999))
 
     otp_store[email] = {
@@ -229,17 +135,16 @@ def register():
 
     pending_users[email] = data
 
-    msg = Message("OTP Verification",
-                  sender=app.config['MAIL_USERNAME'],
-                  recipients=[email])
-    msg.body = f"Your OTP is {otp}"
-    mail.send(msg)
+    try:
+        msg = Message("OTP", sender=app.config['MAIL_USERNAME'], recipients=[email])
+        msg.body = f"OTP is {otp}"
+        mail.send(msg)
+    except:
+        print("EMAIL FAILED")
 
     return jsonify({"message": "OTP sent"})
 
-# =========================================================
-# VERIFY REGISTER
-# =========================================================
+
 @app.route("/verify-register", methods=["POST"])
 def verify_register():
     data = request.json
@@ -249,13 +154,11 @@ def verify_register():
     if email not in otp_store:
         return jsonify({"error": "OTP not found"}), 400
 
-    record = otp_store[email]
-
-    if datetime.datetime.utcnow() > record["expiry"]:
-        return jsonify({"error": "OTP expired"}), 400
-
-    if record["otp"] != otp:
+    if otp_store[email]["otp"] != otp:
         return jsonify({"error": "Invalid OTP"}), 400
+
+    if datetime.datetime.utcnow() > otp_store[email]["expiry"]:
+        return jsonify({"error": "Expired OTP"}), 400
 
     user = pending_users[email]
     tier = get_tier(float(user["income"]))
@@ -264,8 +167,8 @@ def verify_register():
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT INTO users(name, email, phone, password, income, tier, role, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'INACTIVE')
+        INSERT INTO users(name,email,phone,password,income,tier,role,status)
+        VALUES(?,?,?,?,?,?,?,'INACTIVE')
     """, (
         user["name"], email, user["phone"],
         user["password"], user["income"],
@@ -275,135 +178,72 @@ def verify_register():
     conn.commit()
     conn.close()
 
-    del otp_store[email]
-    del pending_users[email]
+    return jsonify({"message": "Registered"})
 
-    return jsonify({"message": "Registered. Wait for approval", "tier": tier})
-
-# =========================================================
-# LOGIN
-# =========================================================
+# ================= LOGIN =================
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
-    email = data["email"]
-    password = data["password"]
 
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT user_id, email, password, status FROM users
-        WHERE email=?
-    """, (email,))
-
+    cursor.execute("SELECT * FROM users WHERE email=?", (data["email"],))
     user = cursor.fetchone()
+
     conn.close()
 
-    if not user or user["password"] != password:
+    if not user or user["password"] != data["password"]:
         return jsonify({"error": "Invalid credentials"}), 401
 
     if user["status"] != "ACTIVE":
-        return jsonify({"error": "Account not approved"}), 403
+        return jsonify({"error": "Not approved"}), 403
 
-    token = generate_token(user["user_id"], user["email"])
-    return jsonify({"token": token})
 
-# =========================================================
-# ACCOUNT
-# =========================================================
+    return jsonify({
+        "user_id": user["user_id"],
+        "role": user["role"],
+        "email": user["email"]
+    })
+
+# ================= ACCOUNT =================
 @app.route("/account", methods=["GET"])
 def account():
-    user = get_current_user()
-    if not user:
-        return jsonify({"error": "Unauthorized"}), 401
+    user_id = request.args.get("user_id")
+
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
 
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT account_number, account_type, account_tier, balance, status
-        FROM accounts WHERE user_id=?
-    """, (user["user_id"],))
-
+    cursor.execute("SELECT * FROM accounts WHERE user_id=?", (user_id,))
     acc = cursor.fetchone()
-    conn.close()
 
     if not acc:
-        return jsonify({"error": "Account not found"}), 404
-
-    return jsonify(dict(acc))
-
-# =========================================================
-# APPROVE USER
-# =========================================================
-@app.route("/approve/<int:user_id>", methods=["POST"])
-def approve(user_id):
-    user = get_current_user()
-    if not user:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT role FROM users WHERE user_id=?", (user["user_id"],))
-    approver = cursor.fetchone()
-
-    if not approver or approver["role"] != "EMPLOYEE":
-        return jsonify({"error": "Only employee allowed"}), 403
-
-    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    target = cursor.fetchone()
-
-    if not target:
-        return jsonify({"error": "User not found"}), 404
-
-    cursor.execute("UPDATE users SET status='ACTIVE' WHERE user_id=?", (user_id,))
-
-    acc_no = str(random.randint(1000000000, 9999999999))
+        return jsonify({"error": "No account"}), 404
 
     cursor.execute("""
-        INSERT INTO accounts(user_id, account_number, account_type, account_tier, balance, status)
-        VALUES (?, ?, 'SAVINGS', ?, 0, 'ACTIVE')
-    """, (user_id, acc_no, target["tier"]))
+        SELECT 
+        COALESCE(SUM(CASE WHEN to_account=? THEN amount ELSE 0 END),0)
+        - COALESCE(SUM(CASE WHEN from_account=? THEN amount ELSE 0 END),0)
+        AS balance
+        FROM transactions
+    """, (acc["account_number"], acc["account_number"]))
 
-    conn.commit()
+    bal = cursor.fetchone()["balance"]
+
+    result = dict(acc)
+    result["balance"] = float(bal)
+
     conn.close()
+    return jsonify(result)
 
-    return jsonify({"message": "Approved", "account_number": acc_no})
-
-# =========================================================
-# LOGOUT
-# =========================================================
-@app.route("/logout", methods=["POST"])
-def logout():
-    auth = request.headers.get("Authorization")
-    if not auth:
-        return jsonify({"error": "Token missing"}), 401
-
-    token = auth.split(" ")[1]
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("INSERT INTO token_blacklist(token, created_at) VALUES (?, ?)",
-                   (token, str(datetime.datetime.utcnow())))
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({"message": "Logged out"})
-
-# =========================================================
-# ADD BENEFICIARY
-# =========================================================
 @app.route("/add-beneficiary", methods=["POST"])
 def add_beneficiary():
-    user = get_current_user()
-    if not user:
-        return jsonify({"error": "Unauthorized"}), 401
-
     data = request.json
+
+    user_id = data["user_id"]
 
     conn = get_db()
     cursor = conn.cursor()
@@ -412,7 +252,7 @@ def add_beneficiary():
         INSERT INTO beneficiaries(user_id, beneficiary_name, account_number, ifsc_code)
         VALUES (?, ?, ?, ?)
     """, (
-        user["user_id"],
+        user_id,
         data["beneficiary_name"],
         data["account_number"],
         data["ifsc_code"]
@@ -422,28 +262,23 @@ def add_beneficiary():
     conn.close()
 
     return jsonify({"message": "Beneficiary added"})
-
-# =========================================================
-# TRANSFER INITIATE
 # =========================================================
 @app.route("/transfer/initiate", methods=["POST"])
 def initiate_transfer():
-    user = get_current_user()
-    if not user:
-        return jsonify({"error": "Unauthorized"}), 401
-
     data = request.json
+
+    user_id = data["user_id"]
 
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT account_number FROM accounts WHERE user_id=?", (user["user_id"],))
+    cursor.execute("SELECT account_number FROM accounts WHERE user_id=?", (user_id,))
     sender = cursor.fetchone()
 
     cursor.execute("""
         SELECT account_number FROM beneficiaries
         WHERE user_id=? AND beneficiary_name=?
-    """, (user["user_id"], data["beneficiary_name"]))
+    """, (user_id, data["beneficiary_name"]))
 
     ben = cursor.fetchone()
 
@@ -458,12 +293,12 @@ def initiate_transfer():
 
     otp = str(random.randint(100000, 999999))
 
-    transfer_otp_store[user["email"]] = {
+    transfer_otp_store[user_id] = {
         "otp": otp,
         "expiry": datetime.datetime.utcnow() + timedelta(minutes=5)
     }
 
-    pending_transfer[user["email"]] = {
+    pending_transfer[user_id] = {
         "from": sender["account_number"],
         "to": ben["account_number"],
         "amount": amount,
@@ -472,297 +307,279 @@ def initiate_transfer():
         "total": total
     }
 
-    msg = Message("Transfer OTP", sender=app.config['MAIL_USERNAME'], recipients=[user["email"]])
-    msg.body = f"OTP: {otp}"
-    mail.send(msg)
-
     return jsonify({"message": "OTP sent"})
-
 # =========================================================
 # VERIFY TRANSFER
 # =========================================================
 @app.route("/transfer/verify", methods=["POST"])
 def verify_transfer():
-    user = get_current_user()
-    if not user:
-        return jsonify({"error": "Unauthorized"}), 401
+    data = request.json
+    user_id = data["user_id"]
+    otp = data["otp"]
 
-    email = user["email"]
-    otp = request.json["otp"]
+    if user_id not in transfer_otp_store:
+        return jsonify({"error": "OTP not found"}), 400
 
-    if email not in transfer_otp_store or transfer_otp_store[email]["otp"] != otp:
+    if transfer_otp_store[user_id]["otp"] != otp:
         return jsonify({"error": "Invalid OTP"}), 400
 
-    t = pending_transfer[email]
+    t = pending_transfer[user_id]
 
     conn = get_db()
     cursor = conn.cursor()
 
-    try:
-        conn.execute("BEGIN")
+    conn.execute("BEGIN")
 
-        cursor.execute("SELECT balance FROM accounts WHERE account_number=?", (t["from"],))
-        sender = cursor.fetchone()
+    cursor.execute("SELECT balance FROM accounts WHERE account_number=?", (t["from"],))
+    sender = cursor.fetchone()
 
-        if sender["balance"] < t["total"]:
-            raise Exception("Insufficient balance")
+    if sender["balance"] < t["total"]:
+        return jsonify({"error": "Insufficient balance"}), 400
 
-        cursor.execute("UPDATE accounts SET balance = balance - ? WHERE account_number=?", (t["total"], t["from"]))
+    cursor.execute("UPDATE accounts SET balance = balance - ? WHERE account_number=?",
+                   (t["total"], t["from"]))
 
-        if t["mode"] in ["NEFT", "RTGS"]:
-            time.sleep(5)
+    if t["mode"] in ["NEFT", "RTGS"]:
+        time.sleep(5)
 
-        cursor.execute("UPDATE accounts SET balance = balance + ? WHERE account_number=?", (t["amount"], t["to"]))
+    cursor.execute("UPDATE accounts SET balance = balance + ? WHERE account_number=?",
+                   (t["amount"], t["to"]))
 
-        cursor.execute("""
-            INSERT INTO transactions(from_account, to_account, amount, mode, charge, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'SUCCESS', ?)
-        """, (t["from"], t["to"], t["amount"], t["mode"], t["charge"], str(datetime.datetime.utcnow())))
+    cursor.execute("""
+        INSERT INTO transactions(from_account, to_account, amount, mode, charge, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'SUCCESS', ?)
+    """, (t["from"], t["to"], t["amount"], t["mode"], t["charge"], str(datetime.datetime.utcnow())))
 
-        conn.commit()
+    conn.commit()
 
-        del transfer_otp_store[email]
-        del pending_transfer[email]
+    del transfer_otp_store[user_id]
+    del pending_transfer[user_id]
 
-        return jsonify({"message": "Transfer successful"})
+    return jsonify({"message": "Transfer successful"})
 
-    except Exception as e:
-        conn.rollback()
-        return jsonify({"error": str(e)})
 
-    finally:
-        conn.close()
+# ================= LOANS =================
+@app.route("/loan/request", methods=["POST"])
+def loan_request():
+    data = request.json
+    user_id = data["user_id"]
 
-# =========================================================
-# MINI STATEMENT
-# =========================================================
-@app.route("/mini-statement/<acc>")
-def mini_statement(acc):
     conn = get_db()
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT * FROM transactions
-        WHERE from_account=? OR to_account=?
-        ORDER BY created_at DESC LIMIT 10
-    """, (acc, acc))
+        SELECT * FROM accounts 
+        WHERE account_number=? AND user_id=?
+    """, (data["account_number"], user_id))
 
-    rows = cursor.fetchall()
-    return jsonify([dict(r) for r in rows])
-
-# =========================================================
-# LOAN REQUEST
-# =========================================================
-@app.route("/loan/request", methods=["POST"])
-def loan_request():
-    user = get_current_user()
-    if not user:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    data = request.json
-    acc_no = data["account_number"]
-    amount = float(data["loan_amount"])
-    tenure = int(data["tenure_months"])
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM accounts WHERE account_number=? AND user_id=?", (acc_no, user["user_id"]))
     acc = cursor.fetchone()
 
     if not acc:
         return jsonify({"error": "Invalid account"}), 403
 
-    tier = acc["account_tier"]
+    rate_map = {"SILVER": 12, "GOLD": 10, "PLATINUM": 8, "DIAMOND": 6}
+    rate = rate_map.get(acc["account_tier"], 12)
 
-    rates = {"SILVER": 12, "GOLD": 10, "PLATINUM": 8, "DIAMOND": 6}
-    rate = rates.get(tier, 12)
+    amount = float(data["loan_amount"])
+    tenure = int(data["tenure_months"])
 
     interest = (amount * rate * tenure) / 1200
     total = amount + interest
     emi = total / tenure
 
     cursor.execute("""
-        INSERT INTO loans(account_number, loan_amount, interest_rate, tenure_months, emi,
-        status, remaining_amount, paid_amount)
-        VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, 0)
-    """, (acc_no, amount, rate, tenure, emi, total))
+        INSERT INTO loans(account_number,loan_amount,interest_rate,
+        tenure_months,emi,status,remaining_amount,paid_amount)
+        VALUES(?,?,?,?,?,'ACTIVE',?,0)
+    """, (acc["account_number"], amount, rate, tenure, emi, total))
 
     conn.commit()
     conn.close()
 
-    return jsonify({"message": "Loan approved", "emi": round(emi, 2)})
+    return jsonify({"emi": emi, "total": total})
 
-# =========================================================
-# PAY EMI
-# =========================================================
 @app.route("/loan/pay-emi", methods=["POST"])
 def pay_emi():
-    user = get_current_user()
-    if not user:
-        return jsonify({"error": "Unauthorized"}), 401
-
     data = request.json
-    loan_id = data["loan_id"]
-    amount = float(data["amount"])
+    user_id = data["user_id"]
 
     conn = get_db()
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT l.*, a.user_id FROM loans l
-        JOIN accounts a ON l.account_number = a.account_number
+        SELECT l.*, a.user_id 
+        FROM loans l
+        JOIN accounts a ON l.account_number=a.account_number
         WHERE l.id=?
-    """, (loan_id,))
+    """, (data["loan_id"],))
+
     loan = cursor.fetchone()
 
-    if not loan or loan["user_id"] != user["user_id"]:
+    if not loan or loan["user_id"] != int(user_id):
         return jsonify({"error": "Invalid loan"}), 403
 
-    new_remaining = loan["remaining_amount"] - amount
-    status = "ACTIVE" if new_remaining > 0 else "CLOSED"
+    remaining = float(loan["remaining_amount"])
+    pay = float(data["amount"])
+
+    remaining = max(0, remaining - pay)
+    status = "CLOSED" if remaining == 0 else "ACTIVE"
 
     cursor.execute("""
         UPDATE loans SET remaining_amount=?, status=? WHERE id=?
-    """, (new_remaining, status, loan_id))
+    """, (remaining, status, data["loan_id"]))
 
     conn.commit()
     conn.close()
 
-    return jsonify({"message": "EMI paid", "remaining": new_remaining})
+    return jsonify({"remaining": remaining, "status": status})
 
-# =========================================================
-# APPLY PENALTY
-# =========================================================
-@app.route("/loan/apply-penalty", methods=["POST"])
-def apply_penalty():
-    user = get_current_user()
-    if not user:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT role FROM users WHERE user_id=?", (user["user_id"],))
-    role = cursor.fetchone()
-
-    if not role or role["role"] != "EMPLOYEE":
-        return jsonify({"error": "Only employee allowed"}), 403
-
-    cursor.execute("""
-        SELECT l.*, a.account_tier FROM loans l
-        JOIN accounts a ON l.account_number = a.account_number
-        WHERE l.status!='CLOSED'
-    """)
-    loans = cursor.fetchall()
-
-    for loan in loans:
-        rates = {"SILVER": 0.02, "GOLD": 0.015, "PLATINUM": 0.01, "DIAMOND": 0.005}
-        penalty = loan["remaining_amount"] * rates.get(loan["account_tier"], 0.02)
-
-        cursor.execute("""
-            UPDATE loans SET remaining_amount=remaining_amount+? WHERE id=?
-        """, (penalty, loan["id"]))
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({"message": "Penalty applied"})
-
-
-# =========================================================
-# FORGOT PASSWORD (OTP)
-# =========================================================
 @app.route("/forgot-password", methods=["POST"])
 def forgot_password():
     data = request.get_json()
+    email = data.get("email")
 
-    acc_no = data["account_number"]
-    phone = data["mobile"]
-    email = data["email"]
+    if not email:
+        return jsonify({"error": "Email required"}), 400
 
     conn = get_db()
     cursor = conn.cursor()
 
-    # 🔍 verify using JOIN (correct way)
-    cursor.execute("""
-        SELECT u.* FROM users u
-        JOIN accounts a ON u.user_id = a.user_id
-        WHERE a.account_number=? AND u.phone=? AND u.email=?
-    """, (acc_no, phone, email))
-
+    cursor.execute("SELECT * FROM users WHERE email=?", (email,))
     user = cursor.fetchone()
-
-    if not user:
-        return jsonify({"error": "Invalid account details"}), 401
-
-    otp = str(random.randint(100000, 999999))
-    expiry = (datetime.datetime.now() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-
-    cursor.execute("""
-        UPDATE users SET reset_otp=?, otp_expiry=?
-        WHERE user_id=?
-    """, (otp, expiry, user["user_id"]))
-
-    conn.commit()
     conn.close()
 
-    print(f"[SMS] OTP: {otp}")
-    print(f"[EMAIL] OTP: {otp}")
+    if not user:
+        return jsonify({"error": "User not found"}), 404
 
-    return jsonify({"message": "OTP sent", "validity": "5 minutes"})
+    otp = str(random.randint(100000, 999999))
 
-# =========================================================
-# RESET PASSWORD
-# =========================================================
-@app.route("/reset-password", methods=["POST"])
+    otp_store[email] = {
+        "otp": otp,
+        "expiry": datetime.datetime.utcnow() + timedelta(minutes=5)
+    }
+
+    try:
+        msg = Message(
+            "Password Reset OTP",
+            sender=app.config['MAIL_USERNAME'],
+            recipients=[email]
+        )
+        msg.body = f"Your OTP for password reset is: {otp}"
+        mail.send(msg)
+    except Exception as e:
+        print("EMAIL ERROR:", e)
+
+    return jsonify({"message": "OTP sent to email"})
+
+#@app.route("/reset-password", methods=["POST"])
 def reset_password():
     data = request.get_json()
 
-    acc_no = data["account_number"]
-    otp_input = data["otp"]
-    new_password = data["new_password"]
+    email = data.get("email")
+    otp_input = data.get("otp")
+    new_password = data.get("new_password")
 
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT u.* FROM users u
-        JOIN accounts a ON u.user_id = a.user_id
-        WHERE a.account_number=?
-    """, (acc_no,))
-
+    cursor.execute("SELECT * FROM users WHERE email=?", (email,))
     user = cursor.fetchone()
 
     if not user:
-        return jsonify({"error": "Account not found"}), 404
+        return jsonify({"error": "User not found"}), 404
 
-    if user["reset_otp"] != otp_input:
-        return jsonify({"error": "Invalid OTP"}), 400
+    # check OTP from RAM store (NOT DB)
+    if email not in otp_store:
+        return jsonify({"error": "OTP not found"}), 400
 
-    if not user["otp_expiry"]:
-        return jsonify({"error": "OTP not generated"}), 400
+    record = otp_store[email]
 
-    expiry = datetime.datetime.strptime(user["otp_expiry"], "%Y-%m-%d %H:%M:%S")
-
-    if datetime.datetime.now() > expiry:
+    if datetime.datetime.utcnow() > record["expiry"]:
         return jsonify({"error": "OTP expired"}), 400
 
-    # 🔐 update password
+    if record["otp"] != otp_input:
+        return jsonify({"error": "Invalid OTP"}), 400
+
     cursor.execute("""
-        UPDATE users
-        SET password=?, reset_otp=NULL, otp_expiry=NULL
-        WHERE user_id=?
-    """, (new_password, user["user_id"]))
+        UPDATE users SET password=? WHERE email=?
+    """, (new_password, email))
 
     conn.commit()
     conn.close()
 
+    del otp_store[email]
+
     return jsonify({"message": "Password reset successful"})
 
-# =========================================================
-# RUN
-# =========================================================
 
+@app.route("/verify-reset-otp", methods=["POST"])
+def verify_reset_otp():
+    data = request.get_json()
+    email = data.get("email")
+    otp = data.get("otp")
+
+    if email not in otp_store:
+        return jsonify({"error": "OTP not found"}), 400
+
+    record = otp_store[email]
+
+    if datetime.datetime.utcnow() > record["expiry"]:
+        return jsonify({"error": "OTP expired"}), 400
+
+    if record["otp"] != otp:
+        return jsonify({"error": "Invalid OTP"}), 400
+
+    return jsonify({"message": "OTP verified"})
+
+
+# ================= LOGOUT =================
+@app.route("/logout", methods=["POST"])
+def logout():
+    return jsonify({
+        "message": "Logged out successfully"
+    })
+
+@app.route("/mini-statement/<acc>", methods=["GET"])
+def mini_statement(acc):
+    user_id = request.args.get("user_id")
+
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # ensure account belongs to user
+        cursor.execute("""
+            SELECT account_number 
+            FROM accounts 
+            WHERE account_number=? AND user_id=?
+        """, (acc, user_id))
+
+        if not cursor.fetchone():
+            return jsonify({"error": "Invalid account"}), 403
+
+        # fetch last 10 transactions
+        cursor.execute("""
+            SELECT *
+            FROM transactions
+            WHERE from_account=? OR to_account=?
+            ORDER BY created_at DESC
+            LIMIT 10
+        """, (acc, acc))
+
+        rows = cursor.fetchall()
+        result = [dict(r) for r in rows] if rows else []
+
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        conn.close()
+
+# ================= RUN =================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=10000, debug=True)
